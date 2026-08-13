@@ -1,26 +1,52 @@
-name: Android CI
+name: Build
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: set up JDK 11
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-        cache: gradle
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
-    - name: Build with Gradle
-      run: ./gradlew build
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "build-tools;34.0.0 ndk;26.1.10909125 platforms;android-34"
+
+      - name: Configure Local Properties
+        run: |
+          touch local.properties
+          echo "apiId=1097" >> local.properties
+          echo "apiHash=b682142d58a628d005f329971932371b" >> local.properties
+          echo "APP_CENTER_HASH=dummy" >> local.properties
+          echo "MAPS_API_KEY=dummy" >> local.properties
+
+      - name: Create Google Services File
+        run: |
+          mkdir -p TMessagesProj_App
+          echo '{"project_info":{"project_number":"123","project_id":"dummy","storage_bucket":"a.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123:android:123","android_client_info":{"package_name":"org.telegram.messenger"}},"oauth_client":[],"api_key":[{"current_key":"dummy"}],"services":{"analytics_service":{"status":1}}}],"configuration_version":"1"}' > TMessagesProj_App/google-services.json
+
+      - name: Build Debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --continue
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Custom-Telegram-APK
+          path: TMessagesProj_App/build/outputs/apk/debug/*.apk
