@@ -1,74 +1,131 @@
-name: Build
+Name: Build
 
 on:
+  push:
+    branches: [ "main", "dev", "ci" ]
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - '!.github/workflows/build.yml'
+  workflow_call:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    permissions:
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_HARDLINK: "true"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "10G"
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Set up ccache
+        uses: Chocobo1/setup-ccache-action@v1
+        with:
+          remove_stale_cache: false
+
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
         with:
-          packages: "build-tools;34.0.0 ndk;26.1.10909125 platforms;android-34"
+          packages: "build-tools;37.0.0 ndk;27.3.13750724 platforms;android-37.0"
 
-      - name: Configure Dummy Secrets & Mock Google Services
+      - name: Configure Gradle
         run: |
-          # 1. 补全 local.properties 所需字段
-          touch local.properties
-          echo "apiId=1097" >> local.properties
-          echo "apiHash=b682142d58a628d005f329971932371b" >> local.properties
-          echo "APP_CENTER_HASH=dummy" >> local.properties
-          echo "MAPS_API_KEY=dummy" >> local.properties
+          mkdir -p ~/.gradle
+          echo 'org.gradle.caching=true' >> ~/.gradle/gradle.properties
+          echo 'org.gradle.parallel=true' >> ~/.gradle/gradle.properties
+          echo 'org.gradle.jvmargs=-Xmx56g -Dfile.encoding=UTF-8 -XX:+UseParallelGC' >> ~/.gradle/gradle.properties
+          echo 'android.native.buildOutput=verbose' >> ~/.gradle/gradle.properties
+
+      - name: Configure Signing
+        run: |
+          echo "storeFile=${{ github.workspace }}/keystore.jks" >> local.properties
+          echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> local.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> local.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> local.properties
           
-          # 2. 生成合法的 Google Services JSON 骨架，防止插件读取 null 报错
-          mkdir -p TMessagesProj_App
-          cat << 'EOF' > TMessagesProj_App/google-services.json
-          {
-            "project_info": {
-              "project_number": "1234567890",
-              "project_id": "dummy-project",
-              "storage_bucket": "dummy.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:1234567890:android:1234567890",
-                  "android_client_info": {
-                    "package_name": "org.telegram.messenger"
-                  }
-                },
-                "oauth_client": [],
-                "api_key": [{ "current_key": "dummy_api_key" }],
-                "services": { "analytics_service": { "status": 1 } }
-              }
-            ],
-            "configuration_version": "1"
-          }
-          EOF
+          echo "${{ secrets.KEYSTORE_JKS }}" | base64 --decode > keystore.jks
 
-      - name: Build Debug APK
+      - name: Configure Secrets
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --continue
+          echo "apiId=${{ secrets.API_ID }}" >> local.properties
+          echo "apiHash=${{ secrets.API_HASH }}" >> local.properties
+          echo "helperBotId=${{ secrets.HELPER_BOT_ID }}" >> local.properties
+          echo "helperBotUsername=${{ secrets.HELPER_BOT_USERNAME }}" >> local.properties
+          echo "sentryDsn=${{ secrets.SENTRY_DSN }}" >> local.properties
+          echo "mapsApiKey=${{ secrets.MAPS_API_KEY }}" >> local.properties
 
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+          echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > TMessagesProj_App/google-services.json
+          echo "${{ secrets.SENTRY_PROPERTIES }}" | base64 --decode > sentry.properties
+
+      - name: Build with Gradle
+        run: |
+          ./gradlew assembleRelease
+          ./gradlew bundlePlay
+          ./gradlew sentryUploadSourceBundlePlay
+
+      - name: Attest
+        uses: actions/attest@v4
         with:
-          name: Custom-Telegram-APK
-          path: TMessagesProj_App/build/outputs/apk/debug/*.apk
+          subject-path: '${{ github.workspace }}/TMessagesProj_App/build/outputs'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: outputs
+          path: TMessagesProj_App/build/outputs
+
+      - name: Upload arm64-v8a build apk
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/apk/release/*-arm64-v8a.apk
+          archive: false
+
+      - name: Upload armeabi-v7a build apk
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/apk/release/*-armeabi-v7a.apk
+          archive: false
+
+      - name: Upload universal build apk
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/apk/release/*-universal.apk
+          archive: false
+
+      - name: Upload x86 build apk
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/apk/release/*-x86.apk
+          archive: false
+
+      - name: Upload x86_64 build apk
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/apk/release/*-x86_64.apk
+          archive: false
+
+      - name: Upload build bundle
+        uses: actions/upload-artifact@v7
+        with:
+          path: TMessagesProj_App/build/outputs/bundle/play/*-play.aab
+          archive: false
